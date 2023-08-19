@@ -5,6 +5,8 @@ import type {
   TurbopackResult,
   WrittenEndpoint,
 } from '../../../build/swc'
+import type { Socket } from 'net'
+import ws from 'next/dist/compiled/ws'
 
 import fs from 'fs'
 import url from 'url'
@@ -85,7 +87,8 @@ import { srcEmptySsgManifest } from '../../../build/webpack/plugins/build-manife
 import { PropagateToWorkersField } from './types'
 import { MiddlewareManifest } from '../../../build/webpack/plugins/middleware-plugin'
 import { devPageFiles } from '../../../build/webpack/plugins/next-types-plugin/shared'
-import type { RenderWorkers } from '../router-server'
+
+const wsServer = new ws.Server({ noServer: true })
 
 type SetupOpts = {
   renderWorkers: RenderWorkers
@@ -719,6 +722,34 @@ async function startWatcher(opts: SetupOpts) {
 
         if (prop === 'activeConfigs') {
           return []
+        }
+
+        if (prop === 'onHMR') {
+          return (req: IncomingMessage, socket: Socket, head: Buffer) => {
+            console.log({ req, socket, head })
+            wsServer.handleUpgrade(req, socket, head, (client) => {
+              client.addEventListener('message', ({ data }) => {
+                const parsedData = JSON.parse(
+                  typeof data !== 'string' ? data.toString() : data
+                )
+
+                if (parsedData.event === 'ping') {
+                  // const result = parsedData.appDirRoute
+                  // ? handleAppDirPing(parsedData.tree)
+                  // : handlePing(parsedData.page)
+                  const result = { success: true }
+                  client.send(
+                    JSON.stringify({
+                      ...result,
+                      [parsedData.appDirRoute ? 'action' : 'event']: 'pong',
+                    })
+                  )
+                } else {
+                  console.log({ parsedData })
+                }
+              })
+            })
+          }
         }
         return () => {}
       },
