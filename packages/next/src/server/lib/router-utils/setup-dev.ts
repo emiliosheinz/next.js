@@ -4,6 +4,7 @@ import type {
   Route,
   TurbopackResult,
   WrittenEndpoint,
+  Middleware,
 } from '../../../build/swc'
 import type { Socket } from 'net'
 import ws from 'next/dist/compiled/ws'
@@ -164,6 +165,7 @@ async function startWatcher(opts: SetupOpts) {
     })
     const iter = project.entrypointsSubscribe()
     const curEntries: Map<string, Route> = new Map()
+    let prevMiddleware: boolean | undefined = undefined
     const globalEntries: {
       app: Endpoint | undefined
       document: Endpoint | undefined
@@ -176,11 +178,13 @@ async function startWatcher(opts: SetupOpts) {
 
     try {
       async function handleEntries() {
+        let subscriptions: AsyncIterator<any>[] = []
         for await (const entrypoints of iter) {
           globalEntries.app = entrypoints.pagesAppEndpoint
           globalEntries.document = entrypoints.pagesDocumentEndpoint
           globalEntries.error = entrypoints.pagesErrorEndpoint
 
+          subscriptions.forEach((s) => s.return?.())
           curEntries.clear()
 
           for (const [pathname, route] of entrypoints.routes) {
@@ -197,6 +201,31 @@ async function startWatcher(opts: SetupOpts) {
                 break
             }
           }
+
+          const { middleware } = entrypoints
+          if (prevMiddleware === undefined) {
+            // Initialization loop, middleware can't have changed.
+            prevMiddleware = !!middleware
+          } else if (prevMiddleware && !middleware) {
+            // Went from middleware to no middleware
+            hotReloader.send({ event: 'middlewareChanges' })
+          } else if (!prevMiddleware && middleware) {
+            // Went from no middleware to middleware
+            hotReloader.send({ event: 'middlewareChanges' })
+          }
+          if (middleware) {
+            ;(async () => {
+              const changed = middleware.endpoint.changed()
+              subscriptions.push(changed)
+
+              const { done } = await changed.next()
+              // If we're done, then the subscription was exited because of a
+              // change in the app structure, not a rewrite of the middleware.
+              if (!done) {
+                hotReloader.send({ event: 'middlewareChanges' })
+              }
+            })()
+          }
         }
       }
       handleEntries().catch((err) => {
@@ -212,12 +241,11 @@ async function startWatcher(opts: SetupOpts) {
     const pagesManifests = new Map<string, PagesManifest>()
     const appPathsManifests = new Map<string, PagesManifest>()
     const middlewareManifests = new Map<string, MiddlewareManifest>()
-    const clientToHmrSubscription = new WeakMap<
+    const clientToHmrSubscription = new Map<
       ws,
       Map<string, AsyncIterator<any>>
     >()
     const clients = new Set<ws>()
-
     const issues = new Map<string, Set<string>>()
 
     function mergeBuildManifests(manifests: Iterable<BuildManifest>) {
@@ -757,19 +785,15 @@ async function startWatcher(opts: SetupOpts) {
               clients.add(client)
               client.on('close', () => clients.delete(client))
 
-              // client send:
+              // server sends:
               //   - Middleware HMR:
               //     - { action: 'building' }
               //     - { action: 'sync', hash, errors, warnings, versionInfo }
               //     - { action: 'built', hash }
               //   - HMR
               //      - { action: 'reloadPage' }
-              //      - { action: 'serverComponentChanges' }
-              //      - { event: 'middlewareChanges' }
               //      - { event: 'serverOnlyChanges', pages }
-              //      - { action: 'addedPage', data: [page] }
-              //      - { action: 'removedPage', data: [page] }
-              //      - { action: 'devPagesManifestUpdate', data: [{ devPagesManifest: true }] }
+              //      - { action: 'serverComponentChanges' }
 
               client.addEventListener('message', ({ data }) => {
                 const parsedData = JSON.parse(
@@ -810,7 +834,7 @@ async function startWatcher(opts: SetupOpts) {
                 }
               })
 
-              hotReloader.send({ type: 'turbopack-connected' })
+              client.send(JSON.stringify({ type: 'turbopack-connected' }))
             })
           }
         }
