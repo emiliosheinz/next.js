@@ -524,24 +524,23 @@ async function startWatcher(opts: SetupOpts) {
       subscription?.return!()
     }
 
-    function changeSubscription(
+    async function changeSubscription(
       page: string,
-      endpoint: Endpoint,
+      endpoint: Endpoint | undefined,
       makePayload: (
         page: string,
         change: ServerClientChangeType
       ) => object | void
     ) {
-      if (changeSubscriptions.has(page)) return
-      ;(async () => {
-        const changed = endpoint.changed()
-        changeSubscriptions.set(page, changed)
+      if (!endpoint || changeSubscriptions.has(page)) return
 
-        for await (const change of changed) {
-          const payload = makePayload(page, change.change)
-          if (payload) hotReloader.send(payload)
-        }
-      })()
+      const changed = endpoint.changed()
+      changeSubscriptions.set(page, changed)
+
+      for await (const change of changed) {
+        const payload = makePayload(page, change.change)
+        if (payload) hotReloader.send(payload)
+      }
     }
 
     hotReloader = new Proxy({} as any, {
@@ -645,6 +644,9 @@ async function startWatcher(opts: SetupOpts) {
                 await globalEntries.document?.writeToDisk()
               )
               await loadPagesManifest('_document')
+              changeSubscription('_document', globalEntries?.document, () => {
+                return { action: 'reloadPage' }
+              })
 
               await processResult(
                 page,
@@ -691,6 +693,9 @@ async function startWatcher(opts: SetupOpts) {
                   await globalEntries.document?.writeToDisk()
                 )
                 await loadPagesManifest('_document')
+                changeSubscription('_document', globalEntries?.document, () => {
+                  return { action: 'reloadPage' }
+                })
 
                 const writtenEndpoint = await processResult(
                   page,
@@ -833,8 +838,6 @@ async function startWatcher(opts: SetupOpts) {
               //     - { action: 'building' }
               //     - { action: 'sync', hash, errors, warnings, versionInfo }
               //     - { action: 'built', hash }
-              //   - HMR
-              //      - { action: 'reloadPage' }
 
               client.addEventListener('message', ({ data }) => {
                 const parsedData = JSON.parse(
